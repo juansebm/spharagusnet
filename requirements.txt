@@ -1,0 +1,25 @@
+# spharagusnet — Neural document OCR for Chilean PRC documents
+# Python >= 3.10
+
+# ── PDF y renderizado de páginas ────────────────────────────────────────────
+pdfplumber>=0.11.0          # extracción de texto de PDFs digitales (lado limpio)
+pdf2image>=1.17.0           # PDF → imagen PIL por página (ambos lados)
+Pillow>=10.0.0              # manipulación de imágenes
+pytesseract>=0.3.13         # OCR rough sólo para alineación página↔texto (no es el producto)
+python-Levenshtein>=0.25.0  # similitud texto para alineación scan↔texto limpio
+
+# ── Deep learning ───────────────────────────────────────────────────────────
+torch>=2.2.0                # PyTorch backend
+transformers>=4.40.0        # Donut, TrOCR, mT5, etc.
+sentencepiece>=0.2.0        # tokenizer para modelos multilingual
+accelerate>=0.30.0          # entrenamiento multi-GPU / mixed precision
+datasets>=2.19.0            # carga de datasets en formato JSONL / image-text
+evaluate>=0.4.2             # métricas: CER, WER, BLEU
+
+# ── Utilidades ──────────────────────────────────────────────────────────────
+tqdm>=4.66.0
+rich>=13.0.0
+pandas>=2.0.0
+numpy>=1.26.0
+requests>=2.31.0
+python-dotenv>=1.0.0
