@@ -5,6 +5,10 @@ bcn_sparql_planes.py
 Lee comunas de `comunas_interes.txt`, filtra `planes_origen_modificaciones.csv`
 por el campo "comunas" y busca cada documento en BCN vía SPARQL.
 
+Uso:
+  python bcn_sparql_planes.py            # solo comunas de comunas_interes.txt
+  python bcn_sparql_planes.py --todas    # TODAS las comunas del CSV
+
 Estrategia por registro — 100% determinista, 0 LLM:
   Track 1 — SPARQL con fecha:
     • Con número de decreto: commune + ?numero + fecha exacta.
@@ -24,6 +28,7 @@ Salida:
   scripts/LOG_planes_bcn.txt
 """
 
+import argparse
 import os
 import re
 import sys
@@ -299,6 +304,19 @@ def leer_comunas_interes() -> list[str]:
         COMUNAS_INTERES_FILE.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.startswith("#")
     ]
+
+
+def leer_todas_comunas_csv(df: pd.DataFrame) -> list[str]:
+    """
+    Extrae todas las comunas únicas de la columna 'comunas' del CSV de entrada.
+    Devuelve lista ordenada alfabéticamente.
+    """
+    if "comunas" not in df.columns:
+        print("❌ Columna 'comunas' no encontrada en el CSV")
+        return []
+    valores = df["comunas"].dropna().str.strip().str.upper().unique()
+    comunas = sorted([v for v in valores if v])
+    return comunas
 
 
 def leer_csv_existente() -> pd.DataFrame:
@@ -719,15 +737,25 @@ def procesar_comuna(
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Busca documentos de planes reguladores en BCN vía SPARQL.",
+    )
+    parser.add_argument(
+        "--todas", "--all",
+        action="store_true",
+        dest="todas",
+        help="Procesar TODAS las comunas presentes en planes_origen_modificaciones.csv "
+             "(ignora comunas_interes.txt).",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
     print("🚀 BCN SPARQL — planes_origen_modificaciones")
     print("=" * 80)
-
-    comunas = leer_comunas_interes()
-    if not comunas:
-        print("❌ comunas_interes.txt vacío o no encontrado")
-        return
-    print(f"✓ Comunas a procesar: {', '.join(comunas)}")
 
     if not CSV_INPUT.exists():
         print(f"❌ No se encontró {CSV_INPUT}")
@@ -743,6 +771,19 @@ def main() -> None:
         print(f"❌ Faltan columnas: {', '.join(faltantes)}")
         print(f"   Disponibles: {', '.join(df_input.columns)}")
         return
+
+    if args.todas:
+        comunas = leer_todas_comunas_csv(df_input)
+        if not comunas:
+            print("❌ No se encontraron comunas en el CSV")
+            return
+        print(f"✓ Modo --todas: {len(comunas)} comunas encontradas en el CSV")
+    else:
+        comunas = leer_comunas_interes()
+        if not comunas:
+            print("❌ comunas_interes.txt vacío o no encontrado")
+            return
+    print(f"✓ Comunas a procesar: {', '.join(comunas)}")
 
     log_inicio(comunas, len(df_input))
 

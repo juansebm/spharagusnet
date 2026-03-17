@@ -1,388 +1,449 @@
 #!/usr/bin/env python3
 """
-Script para entrenar un modelo de extracción de texto relevante
-desde documentos escaneados de MINVU.
+Entrenar modelo de clasificación de bloques OCR.
 
-El modelo aprenderá a:
-1. Identificar qué partes de un documento escaneado son relevantes
-2. Extraer solo el texto relevante (similar al formato de LeyChile)
-3. Filtrar encabezados, pies de página, números de página, etc.
+Cambios vs. versión anterior:
+- **--resume**: carga checkpoint anterior y continúa entrenando (no parte de cero).
+- **Carga desde cache**: lee .labels.json (etiquetados) en vez de re-correr OCR.
+- **Vocab merge**: al resumir, expande el vocabulario con palabras nuevas sin
+  perder los embeddings aprendidos.
 """
 
+import argparse
 import json
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
-from pathlib import Path
-from typing import List, Dict, Tuple
-from PIL import Image
-import numpy as np
+from torch.utils.data import DataLoader, Dataset
 
-# Configuración de GPU
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"🖥️  Usando dispositivo: {DEVICE}")
-if torch.cuda.is_available():
-    print(f"   GPU: {torch.cuda.get_device_name(0)}")
-    print(f"   Memoria GPU: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+# Paquete local
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from spharagusnet.model import DocumentTextExtractor, DEVICE
+from spharagusnet.tokenizer import PAD_TOKEN, UNK_TOKEN, MAX_SEQ_LEN
 
-# Importaciones para OCR y procesamiento
-try:
-    import pytesseract
-    from pytesseract import Output
-    TESSERACT_DISPONIBLE = True
-except ImportError:
-    TESSERACT_DISPONIBLE = False
-    print("⚠️  pytesseract no disponible")
-
-try:
-    from transformers import (
-        LayoutLMv3Processor, LayoutLMv3ForTokenClassification,
-        AutoTokenizer, AutoModelForSequenceClassification,
-        TrainingArguments, Trainer
-    )
-    TRANSFORMERS_DISPONIBLE = True
-except ImportError:
-    TRANSFORMERS_DISPONIBLE = False
-    print("⚠️  transformers no disponible")
-
-# Configuración
+# ── Configuración ────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent.parent
 DATASET_DIR = BASE_DIR / "data" / "dataset_entrenamiento"
 MODEL_DIR = BASE_DIR / "models" / "texto_extractor"
 IMAGENES_DIR = DATASET_DIR / "imagenes"
-TEXTOS_DIR = DATASET_DIR / "textos"
-METADATA_DIR = DATASET_DIR / "metadata"
 
-class DocumentTextExtractor(nn.Module):
-    """
-    Modelo para extraer texto relevante de documentos escaneados.
-    
-    Arquitectura:
-    1. OCR para extraer texto con coordenadas
-    2. Clasificador de bloques (relevante/no relevante)
-    3. Generador de texto limpio
-    """
-    
-    def __init__(self, vocab_size=10000, hidden_dim=512, device=None):
-        super().__init__()
-        self.device = device or DEVICE
-        
-        # Embedding para texto
-        self.text_embedding = nn.Embedding(vocab_size, hidden_dim)
-        
-        # Clasificador de bloques
-        self.block_classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 2, 2)  # relevante/no relevante
-        )
-        
-        # Generador de texto
-        self.text_generator = nn.LSTM(
-            hidden_dim, hidden_dim, 
-            num_layers=2, 
-            batch_first=True
-        )
-        self.output_layer = nn.Linear(hidden_dim, vocab_size)
-        
-        # Mover modelo a GPU si está disponible
-        self.to(self.device)
-    
-    def forward(self, text_tokens, block_positions):
-        # Asegurar que los tensores estén en el dispositivo correcto
-        text_tokens = text_tokens.to(self.device)
-        
-        # Embed texto
-        embedded = self.text_embedding(text_tokens)
-        
-        # Clasificar bloques
-        block_scores = self.block_classifier(embedded.mean(dim=1))
-        
-        # Generar texto relevante
-        lstm_out, _ = self.text_generator(embedded)
-        output = self.output_layer(lstm_out)
-        
-        return output, block_scores
+print(f"🖥️  Dispositivo: {DEVICE}")
+if torch.cuda.is_available():
+    print(f"   GPU: {torch.cuda.get_device_name(0)}")
+    print(f"   VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.2f} GB"
+          if hasattr(torch.cuda.get_device_properties(0), 'total_mem')
+          else f"   VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
 
-def extraer_texto_con_coordenadas(imagen_path: Path) -> List[Dict]:
-    """
-    Extrae texto de una imagen con coordenadas usando OCR.
-    Devuelve lista de bloques de texto con sus posiciones.
-    """
-    if not TESSERACT_DISPONIBLE:
-        return []
-    
-    try:
-        imagen = Image.open(imagen_path)
-        
-        # OCR con detección de layout
-        ocr_data = pytesseract.image_to_data(
-            imagen, 
-            lang='spa',
-            output_type=Output.DICT
-        )
-        
-        bloques = []
-        current_block = None
-        
-        for i in range(len(ocr_data['text'])):
-            texto = ocr_data['text'][i].strip()
-            if not texto:
-                continue
-            
-            conf = int(ocr_data['conf'][i])
-            if conf < 30:  # Filtrar texto con baja confianza
-                continue
-            
-            x = ocr_data['left'][i]
-            y = ocr_data['top'][i]
-            w = ocr_data['width'][i]
-            h = ocr_data['height'][i]
-            
-            bloques.append({
-                'texto': texto,
-                'x': x, 'y': y, 'w': w, 'h': h,
-                'confianza': conf
-            })
-        
-        return bloques
-    except Exception as e:
-        print(f"Error en OCR: {e}")
-        return []
 
-def identificar_bloques_relevantes(
-    bloques_ocr: List[Dict], 
-    texto_referencia: str
-) -> List[Dict]:
-    """
-    Identifica qué bloques de texto son relevantes comparando con el texto de referencia.
-    Usa heurísticas y matching de texto.
-    """
-    texto_ref_lower = texto_referencia.lower()
-    palabras_ref = set(texto_ref_lower.split())
-    
-    bloques_marcados = []
-    
-    for bloque in bloques_ocr:
-        texto_bloque = bloque['texto'].lower()
-        
-        # Heurísticas para identificar texto irrelevante
-        es_irrelevante = False
-        
-        # Filtrar encabezados comunes
-        if any(palabra in texto_bloque for palabra in [
-            'diario oficial', 'página', 'pág.', 'pag.', 
-            'biblioteca del congreso', 'bcn', 'ley chile',
-            '140 años', 'fecha publicación', 'fecha promulgación'
-        ]):
-            es_irrelevante = True
-        
-        # Filtrar números de página
-        if len(texto_bloque.strip()) <= 3 and texto_bloque.strip().isdigit():
-            es_irrelevante = True
-        
-        # Filtrar QR codes y URLs cortas (detectadas como texto)
-        if 'http' in texto_bloque or 'www' in texto_bloque:
-            if len(texto_bloque) < 50:  # URLs cortas probablemente son QR codes
-                es_irrelevante = True
-        
-        # Verificar si el texto aparece en la referencia
-        palabras_bloque = set(texto_bloque.split())
-        overlap = len(palabras_bloque & palabras_ref)
-        
-        # Si hay suficiente overlap, es relevante
-        es_relevante = overlap > 0 and not es_irrelevante
-        
-        bloque['relevante'] = es_relevante
-        bloques_marcados.append(bloque)
-    
-    return bloques_marcados
+# ── Vocabulario ──────────────────────────────────────────────────────────────
 
-def preparar_datos_entrenamiento() -> Tuple[List[Dict], List[Dict]]:
+def construir_vocabulario(datos: List[Dict], max_vocab: int = 10000) -> Dict[str, int]:
+    counter: Counter = Counter()
+    for ej in datos:
+        for bloque in ej["bloques"]:
+            counter.update(bloque["texto"].lower().split())
+    vocab: Dict[str, int] = {"<PAD>": PAD_TOKEN, "<UNK>": UNK_TOKEN}
+    for palabra, _ in counter.most_common(max_vocab - 2):
+        vocab[palabra] = len(vocab)
+    print(f"   Vocabulario: {len(vocab)} tokens (de {len(counter)} únicas)")
+    return vocab
+
+
+def merge_vocab(old_vocab: Dict[str, int], new_vocab: Dict[str, int]) -> Dict[str, int]:
+    """Expande old_vocab con tokens nuevos de new_vocab, sin reasignar IDs existentes."""
+    merged = dict(old_vocab)
+    next_id = max(merged.values()) + 1
+    for token in new_vocab:
+        if token not in merged:
+            merged[token] = next_id
+            next_id += 1
+    return merged
+
+
+# ── Tokenización ─────────────────────────────────────────────────────────────
+
+def tokenizar(texto: str, vocab: Dict[str, int],
+              max_len: int = MAX_SEQ_LEN) -> List[int]:
+    palabras = texto.lower().split()
+    tokens = [vocab.get(p, UNK_TOKEN) for p in palabras[:max_len]]
+    tokens += [PAD_TOKEN] * (max_len - len(tokens))
+    return tokens
+
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+
+class BloqueDataset(Dataset):
+    def __init__(self, datos: List[Dict], vocab: Dict[str, int]):
+        self.samples: List[Tuple[List[int], int]] = []
+        self.n_pos = 0
+        self.n_neg = 0
+        for ej in datos:
+            for bloque in ej["bloques"]:
+                tokens = tokenizar(bloque["texto"], vocab)
+                label = 1 if bloque.get("relevante", False) else 0
+                if label == 1:
+                    self.n_pos += 1
+                else:
+                    self.n_neg += 1
+                self.samples.append((tokens, label))
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        tokens, label = self.samples[idx]
+        return (torch.tensor(tokens, dtype=torch.long),
+                torch.tensor(label, dtype=torch.long))
+
+
+# ── Métricas ─────────────────────────────────────────────────────────────────
+
+def calcular_metricas(preds: torch.Tensor, labels: torch.Tensor) -> Dict[str, float]:
+    tp = int(((preds == 1) & (labels == 1)).sum())
+    fp = int(((preds == 1) & (labels == 0)).sum())
+    fn = int(((preds == 0) & (labels == 1)).sum())
+    tn = int(((preds == 0) & (labels == 0)).sum())
+    total = tp + fp + fn + tn
+    acc = (tp + tn) / total if total else 0
+    prec = tp / (tp + fp) if (tp + fp) else 0
+    rec = tp / (tp + fn) if (tp + fn) else 0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
+    return {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
+
+
+@torch.no_grad()
+def evaluar(model, dl, criterion):
+    model.eval()
+    total_loss = 0.0
+    all_p, all_l = [], []
+    n = 0
+    for tokens, labels in dl:
+        tokens, labels = tokens.to(DEVICE), labels.to(DEVICE)
+        pos = torch.zeros(tokens.size(0), tokens.size(1), 2, device=DEVICE)
+        _, scores = model(tokens, pos)
+        total_loss += criterion(scores, labels).item()
+        n += 1
+        all_p.append(scores.argmax(1).cpu())
+        all_l.append(labels.cpu())
+    m = calcular_metricas(torch.cat(all_p), torch.cat(all_l))
+    m["loss"] = total_loss / max(n, 1)
+    return m
+
+
+# ── Preparación de datos (desde cache) ──────────────────────────────────────
+
+def cargar_datos_desde_cache() -> Tuple[List[Dict], List[Dict]]:
     """
-    Prepara los datos de entrenamiento desde el dataset.
-    Devuelve (datos_entrenamiento, datos_validacion)
+    Lee .labels.json cacheados (generados por preparar_dataset_entrenamiento.py).
+    Es instantáneo vs. re-correr OCR.
     """
+    t0 = time.time()
     indice_path = DATASET_DIR / "indice.json"
-    
     if not indice_path.exists():
         print(f"❌ No se encontró {indice_path}")
-        print("   Ejecuta primero: python preparar_dataset_entrenamiento.py")
+        print("   Ejecuta primero: python scripts/preparar_dataset_entrenamiento.py")
         return [], []
-    
-    with open(indice_path, 'r', encoding='utf-8') as f:
-        indice = json.load(f)
-    
-    datos = []
-    
-    for registro in indice['registros']:
-        try:
-            # Cargar texto de referencia
-            texto_path = DATASET_DIR / registro['texto_path']
-            if not texto_path.exists():
-                continue
-            
-            with open(texto_path, 'r', encoding='utf-8') as f:
-                texto_referencia = f.read()
-            
-            # Procesar cada imagen
-            for img_rel_path in registro['imagenes']:
-                img_path = DATASET_DIR / img_rel_path
-                if not img_path.exists():
-                    continue
-                
-                # Extraer texto con OCR
-                bloques_ocr = extraer_texto_con_coordenadas(img_path)
-                
-                if not bloques_ocr:
-                    continue
-                
-                # Identificar bloques relevantes
-                bloques_marcados = identificar_bloques_relevantes(
-                    bloques_ocr, 
-                    texto_referencia
-                )
-                
-                datos.append({
-                    'imagen_path': str(img_path),
-                    'texto_referencia': texto_referencia,
-                    'bloques_ocr': bloques_marcados,
-                    'metadata': registro
-                })
-        
-        except Exception as e:
-            print(f"Error procesando registro {registro.get('id', 'unknown')}: {e}")
-            continue
-    
-    print(f"✓ Datos preparados: {len(datos)} ejemplos")
-    
-    # Dividir en entrenamiento y validación (80/20)
-    split_idx = int(len(datos) * 0.8)
-    datos_train = datos[:split_idx]
-    datos_val = datos[split_idx:]
-    
-    return datos_train, datos_val
 
-def entrenar_modelo_simple(datos_train: List[Dict], datos_val: List[Dict]):
-    """
-    Entrena un modelo simple de clasificación de bloques usando GPU.
-    Este es un ejemplo básico - se puede mejorar con modelos más sofisticados.
-    """
-    print("\n🚀 Iniciando entrenamiento del modelo...")
-    print(f"   Dispositivo: {DEVICE}")
-    if torch.cuda.is_available():
-        print(f"   GPU: {torch.cuda.get_device_name(0)}")
-        print(f"   Memoria GPU disponible: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-    print(f"   Ejemplos de entrenamiento: {len(datos_train)}")
-    print(f"   Ejemplos de validación: {len(datos_val)}")
-    
-    # Inicializar modelo en GPU
-    model = DocumentTextExtractor(vocab_size=10000, hidden_dim=512, device=DEVICE)
-    model.train()
-    
-    # Optimizador
+    with open(indice_path, "r", encoding="utf-8") as f:
+        indice = json.load(f)
+
+    datos: List[Dict] = []
+    total = len(indice["registros"])
+
+    for i, reg in enumerate(indice["registros"], 1):
+        for img_rel in reg["imagenes"]:
+            img_path = DATASET_DIR / img_rel
+            labels_path = img_path.with_suffix(".labels.json")
+
+            if not labels_path.exists():
+                # Intentar el cache OCR sin labels
+                ocr_path = img_path.with_suffix(".ocr.json")
+                if not ocr_path.exists():
+                    continue
+                # Si hay OCR pero no labels, marcar todo como "sin label"
+                # (no debería pasar si corriste preparar_dataset primero)
+                print(f"   ⚠️  {labels_path.name} no existe, saltando")
+                continue
+
+            with open(labels_path, "r", encoding="utf-8") as f:
+                bloques = json.load(f)
+
+            if bloques:
+                datos.append({
+                    "imagen": str(img_path),
+                    "bloques": bloques,
+                })
+
+        if i % 10 == 0 or i == total:
+            print(f"   [{i}/{total}] registros cargados — {len(datos)} ejemplos")
+
+    dt = time.time() - t0
+    print(f"✅ {len(datos)} ejemplos cargados en {dt:.1f}s (desde cache)")
+
+    # Split 80/20
+    split = int(len(datos) * 0.8)
+    return datos[:split], datos[split:]
+
+
+# ── Entrenamiento ────────────────────────────────────────────────────────────
+
+def formato_tiempo(s: float) -> str:
+    if s < 60:
+        return f"{s:.1f}s"
+    if s < 3600:
+        m, s = divmod(s, 60)
+        return f"{int(m)}m {s:.0f}s"
+    h, r = divmod(s, 3600)
+    m, s = divmod(r, 60)
+    return f"{int(h)}h {int(m)}m"
+
+
+def entrenar(datos_train: List[Dict], datos_val: List[Dict],
+             resume: bool = False, epochs: int = 20, patience: int = 5):
+    t0 = time.time()
+
+    # ── Vocabulario ──────────────────────────────────────────────────────
+    print("\n📖 Vocabulario...")
+    new_vocab = construir_vocabulario(datos_train + datos_val)
+
+    old_vocab = None
+    checkpoint = None
+    start_epoch = 0
+    best_val_f1 = 0.0
+
+    if resume:
+        model_path = MODEL_DIR / "modelo_entrenado.pth"
+        vocab_path = MODEL_DIR / "vocab.json"
+        if model_path.exists() and vocab_path.exists():
+            print("   📦 Cargando checkpoint anterior...")
+            with open(vocab_path, "r", encoding="utf-8") as f:
+                old_vocab = json.load(f)
+            checkpoint = torch.load(model_path, map_location=DEVICE,
+                                    weights_only=False)
+            start_epoch = checkpoint.get("epoch", 0)
+            best_val_f1 = checkpoint.get("val_f1", 0.0)
+            print(f"   Resumiendo desde epoch {start_epoch}, "
+                  f"best val-F1={best_val_f1:.4f}")
+        else:
+            print("   ⚠️  No hay checkpoint, entrenando desde cero")
+
+    # Merge vocabularios si estamos resumiendo
+    if old_vocab is not None:
+        vocab = merge_vocab(old_vocab, new_vocab)
+        nuevas = len(vocab) - len(old_vocab)
+        print(f"   Vocab merged: {len(old_vocab)} → {len(vocab)} (+{nuevas} nuevas)")
+    else:
+        vocab = new_vocab
+
+    vocab_size = len(vocab)
+
+    # ── Datasets ─────────────────────────────────────────────────────────
+    print("📦 Datasets...")
+    ds_train = BloqueDataset(datos_train, vocab)
+    ds_val = BloqueDataset(datos_val, vocab)
+    print(f"   Train: {len(ds_train)} bloques (pos={ds_train.n_pos}, neg={ds_train.n_neg})")
+    print(f"   Val  : {len(ds_val)} bloques (pos={ds_val.n_pos}, neg={ds_val.n_neg})")
+
+    if not ds_train:
+        print("⚠️  Dataset vacío")
+        return
+
+    batch_size = 32
+    dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
+    dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False)
+
+    # ── Modelo ───────────────────────────────────────────────────────────
+    hidden_dim = 512
+    model = DocumentTextExtractor(vocab_size=vocab_size, hidden_dim=hidden_dim,
+                                  device=DEVICE)
+
+    if checkpoint is not None:
+        old_state = checkpoint["model_state_dict"]
+        old_vocab_size = checkpoint.get("vocab_size", len(old_vocab))
+
+        if vocab_size > old_vocab_size:
+            # Expandir embedding y output layer para nuevos tokens
+            print(f"   🔧 Expandiendo modelo: {old_vocab_size} → {vocab_size} tokens")
+            model.load_state_dict(old_state, strict=False)
+            # Copiar pesos antiguos al nuevo embedding
+            with torch.no_grad():
+                old_emb = old_state["text_embedding.weight"]
+                model.text_embedding.weight[:old_vocab_size] = old_emb
+                old_out = old_state["output_layer.weight"]
+                old_bias = old_state["output_layer.bias"]
+                model.output_layer.weight[:old_vocab_size] = old_out
+                model.output_layer.bias[:old_vocab_size] = old_bias
+        else:
+            model.load_state_dict(old_state)
+
+    # ── Pesos de clase ───────────────────────────────────────────────────
+    if ds_train.n_pos > 0 and ds_train.n_neg > 0:
+        w = ds_train.n_neg / ds_train.n_pos
+        weights = torch.tensor([1.0, w], dtype=torch.float32, device=DEVICE)
+        print(f"   Class weights: neg=1.00, pos={w:.2f}")
+    else:
+        weights = None
+
+    criterion = nn.CrossEntropyLoss(weight=weights).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    criterion = nn.CrossEntropyLoss().to(DEVICE)  # Mover loss a GPU
-    
-    # Preparar datos de entrenamiento (ejemplo simplificado)
-    # En producción, necesitarías un DataLoader más sofisticado
-    print("\n📊 Preparando datos para entrenamiento...")
-    
-    # Guardar datos procesados
-    datos_train_path = MODEL_DIR / "datos_train.json"
-    datos_val_path = MODEL_DIR / "datos_val.json"
-    
+
+    if checkpoint is not None and "optimizer_state_dict" in checkpoint:
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            print("   ✓ Optimizer state restaurado")
+        except Exception:
+            print("   ⚠️  No se pudo restaurar optimizer (cambió vocab), usando nuevo")
+
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    
-    with open(datos_train_path, 'w', encoding='utf-8') as f:
-        json.dump(datos_train, f, ensure_ascii=False, indent=2)
-    
-    with open(datos_val_path, 'w', encoding='utf-8') as f:
-        json.dump(datos_val, f, ensure_ascii=False, indent=2)
-    
-    print(f"✓ Datos guardados en {MODEL_DIR}")
-    
-    # Ejemplo de loop de entrenamiento (simplificado)
-    print("\n🔄 Iniciando entrenamiento...")
-    num_epochs = 10
-    batch_size = 8
-    
-    for epoch in range(num_epochs):
+
+    # Guardar vocabulario
+    with open(MODEL_DIR / "vocab.json", "w", encoding="utf-8") as f:
+        json.dump(vocab, f, ensure_ascii=False)
+
+    # ── Loop de entrenamiento ────────────────────────────────────────────
+    epochs_sin_mejora = 0
+    best_epoch = start_epoch
+    historial: List[Dict] = []
+
+    # Cargar historial previo si existe
+    hist_path = MODEL_DIR / "historial_entrenamiento.json"
+    if resume and hist_path.exists():
+        with open(hist_path, "r", encoding="utf-8") as f:
+            historial = json.load(f)
+
+    col = (f"{'Epoch':>7} │ {'Loss':>7} {'Acc':>6} {'Prec':>6} {'Rec':>6} "
+           f"{'F1':>6} │ {'vLoss':>7} {'vAcc':>6} {'vPrec':>6} {'vRec':>6} "
+           f"{'vF1':>6} │ {'t':>6} {'ETA':>8}")
+    sep = "─" * len(col)
+
+    total_epochs = start_epoch + epochs
+    print(f"\n🔄 Epochs {start_epoch + 1}→{total_epochs}, batch={batch_size}, "
+          f"patience={patience}")
+    print(sep)
+    print(col)
+    print(sep)
+
+    t_train = time.time()
+
+    for ep_i in range(epochs):
+        ep = start_epoch + ep_i + 1
+        t_ep = time.time()
+
+        # Train
         model.train()
-        total_loss = 0.0
-        num_batches = 0
-        
-        # Aquí iría el loop real de entrenamiento con batches
-        # Por ahora es un placeholder que muestra cómo usar GPU
-        
-        # Ejemplo de cómo procesar un batch en GPU:
-        # 1. Crear tensores dummy (en producción vendrían del DataLoader)
-        # dummy_tokens = torch.randint(0, 10000, (batch_size, 128)).to(DEVICE)
-        # dummy_positions = torch.randn(batch_size, 128, 2).to(DEVICE)
-        # 
-        # # Forward pass
-        # output, block_scores = model(dummy_tokens, dummy_positions)
-        # 
-        # # Calcular loss (ejemplo)
-        # dummy_labels = torch.randint(0, 2, (batch_size,)).to(DEVICE)
-        # loss = criterion(block_scores, dummy_labels)
-        # 
-        # # Backward pass
-        # optimizer.zero_grad()
-        # loss.backward()
-        # optimizer.step()
-        # 
-        # total_loss += loss.item()
-        # num_batches += 1
-        
-        # Limpiar caché de GPU periódicamente
+        run_loss = 0.0
+        ep_p, ep_l = [], []
+        nb = 0
+        for tokens, labels in dl_train:
+            tokens, labels = tokens.to(DEVICE), labels.to(DEVICE)
+            pos = torch.zeros(tokens.size(0), tokens.size(1), 2, device=DEVICE)
+            _, scores = model(tokens, pos)
+            loss = criterion(scores, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            run_loss += loss.item()
+            nb += 1
+            ep_p.append(scores.argmax(1).cpu())
+            ep_l.append(labels.cpu())
+
+        tr_loss = run_loss / max(nb, 1)
+        tr = calcular_metricas(torch.cat(ep_p), torch.cat(ep_l))
+
+        # Val
+        vl = evaluar(model, dl_val, criterion) if len(ds_val) else {
+            "loss": 0, "accuracy": 0, "precision": 0, "recall": 0, "f1": 0,
+        }
+
+        dt = time.time() - t_ep
+        elapsed = time.time() - t_train
+        eta = (elapsed / (ep_i + 1)) * (epochs - ep_i - 1)
+
+        print(f" {ep:>3}/{total_epochs:<3} │ "
+              f"{tr_loss:7.4f} {tr['accuracy']:6.3f} {tr['precision']:6.3f} "
+              f"{tr['recall']:6.3f} {tr['f1']:6.3f} │ "
+              f"{vl['loss']:7.4f} {vl['accuracy']:6.3f} {vl['precision']:6.3f} "
+              f"{vl['recall']:6.3f} {vl['f1']:6.3f} │ "
+              f"{dt:5.1f}s {formato_tiempo(eta):>8}")
+
+        historial.append({
+            "epoch": ep,
+            "train_loss": tr_loss,
+            "train_acc": tr["accuracy"], "train_prec": tr["precision"],
+            "train_rec": tr["recall"], "train_f1": tr["f1"],
+            "val_loss": vl["loss"],
+            "val_acc": vl["accuracy"], "val_prec": vl["precision"],
+            "val_rec": vl["recall"], "val_f1": vl["f1"],
+        })
+
+        # Early stopping / save best
+        if vl["f1"] > best_val_f1:
+            best_val_f1 = vl["f1"]
+            best_epoch = ep
+            epochs_sin_mejora = 0
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "epoch": ep,
+                "val_f1": best_val_f1,
+                "vocab_size": vocab_size,
+                "hidden_dim": hidden_dim,
+                "device": str(DEVICE),
+            }, MODEL_DIR / "modelo_entrenado.pth")
+        else:
+            epochs_sin_mejora += 1
+            if epochs_sin_mejora >= patience:
+                print(f"\n⏹️  Early stopping (sin mejora en {patience} epochs)")
+                break
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
-        # if num_batches > 0:
-        #     avg_loss = total_loss / num_batches
-        #     print(f"   Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
-    
-    # Guardar modelo entrenado
-    model_path = MODEL_DIR / "modelo_entrenado.pth"
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'device': str(DEVICE),
-        'model_config': {
-            'vocab_size': 10000,
-            'hidden_dim': 512
-        }
-    }, model_path)
-    
-    print(f"✓ Modelo guardado en {model_path}")
-    
-    # Si usó GPU, mostrar uso de memoria
-    if torch.cuda.is_available():
-        print(f"   Memoria GPU usada: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
-        print(f"   Memoria GPU reservada: {torch.cuda.memory_reserved(0) / 1024**3:.2f} GB")
-    
-    print("\n💡 Próximos pasos:")
-    print("   1. Usar LayoutLMv3 o DocFormer para entrenamiento avanzado")
-    print("   2. Fine-tune un modelo vision-language (LLaVA, GPT-4V)")
-    print("   3. Implementar pipeline completo de extracción")
+
+    print(sep)
+
+    # Guardar historial
+    with open(hist_path, "w", encoding="utf-8") as f:
+        json.dump(historial, f, ensure_ascii=False, indent=2)
+
+    print(f"\n📊 Resumen")
+    print(f"   Mejor epoch : {best_epoch}")
+    print(f"   Mejor val-F1: {best_val_f1:.4f}")
+    print(f"   Modelo      : {MODEL_DIR / 'modelo_entrenado.pth'}")
+    print(f"   ⏱️  {formato_tiempo(time.time() - t0)}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    """Función principal."""
-    print("🚀 Entrenamiento de Modelo de Extracción de Texto")
+    parser = argparse.ArgumentParser(description="Entrena clasificador de bloques")
+    parser.add_argument("--resume", action="store_true",
+                        help="Continuar desde el último checkpoint")
+    parser.add_argument("--epochs", type=int, default=20,
+                        help="Número de epochs (default: 20)")
+    parser.add_argument("--patience", type=int, default=5,
+                        help="Early stopping patience (default: 5)")
+    args = parser.parse_args()
+
+    print("🚀 Entrenamiento de Modelo")
     print("=" * 80)
-    
-    # Preparar datos
-    datos_train, datos_val = preparar_datos_entrenamiento()
-    
+
+    datos_train, datos_val = cargar_datos_desde_cache()
     if not datos_train:
-        print("⚠️  No hay datos para entrenar")
+        print("⚠️  Sin datos de entrenamiento")
         return
-    
-    # Entrenar modelo
-    entrenar_modelo_simple(datos_train, datos_val)
-    
-    print("\n✅ Proceso completado")
+
+    entrenar(datos_train, datos_val,
+             resume=args.resume, epochs=args.epochs, patience=args.patience)
+
+    print("\n" + "=" * 80)
+    print("✅ Completado")
+
 
 if __name__ == "__main__":
     main()
