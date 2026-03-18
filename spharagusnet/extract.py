@@ -157,7 +157,7 @@ def extract(
     Returns:
         Texto relevante concatenado.
     """
-    from pdf2image import convert_from_path
+    import fitz  # PyMuPDF
 
     from spharagusnet.ocr import extraer_bloques
 
@@ -174,24 +174,14 @@ def extract(
         usar_modelo = False
 
     textos_paginas: List[str] = []
-    page_num = 1
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    doc = fitz.open(str(pdf_path))
 
-    while True:
-        try:
-            pages = convert_from_path(
-                str(pdf_path), dpi=dpi,
-                first_page=page_num, last_page=page_num,
-            )
-        except Exception:
-            break
-        if not pages:
-            break
-
-        page = pages[0]
-
-        # Guardar temporalmente para OCR
+    for page_num, fitz_page in enumerate(doc, start=1):
+        pix = fitz_page.get_pixmap(matrix=mat)
         tmp = pdf_path.parent / f"_spharagus_tmp_{pdf_path.stem}_{page_num}.png"
-        page.save(tmp, "PNG")
+        pix.save(str(tmp))
+        page_h = pix.height
 
         try:
             bloques = extraer_bloques(tmp)
@@ -203,7 +193,7 @@ def extract(
                     )
                 else:
                     relevantes = _clasificar_bloques_heuristica(
-                        bloques, page.height,
+                        bloques, page_h,
                     )
                 texto_pagina = _limpiar(relevantes)
                 if texto_pagina:
@@ -211,8 +201,8 @@ def extract(
         finally:
             tmp.unlink(missing_ok=True)
 
-        del page, pages
+        del pix
         gc.collect()
-        page_num += 1
 
+    doc.close()
     return "\n\n".join(textos_paginas)

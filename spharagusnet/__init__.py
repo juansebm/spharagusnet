@@ -22,4 +22,4 @@ from spharagusnet.extract import extract, load_model
 from spharagusnet.paths import model_is_available
 
 __all__ = ["extract", "load_model", "download_model", "model_is_available"]
-__version__ = "0.2.0"
+__version__ = "0.2.1"

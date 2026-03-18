@@ -9,7 +9,7 @@ from spharagusnet.paths import MODEL_CACHE_DIR, get_model_path, get_vocab_path
 # ── Configuración de la release ──────────────────────────────────────────────
 # Cambia GITHUB_REPO a tu usuario/repo real antes de publicar.
 GITHUB_REPO = "juansebm/spharagusnet"
-RELEASE_TAG = "v0.2.0"
+RELEASE_TAG = "v0.2.1"
 
 _BASE_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}"
 
@@ -51,7 +51,8 @@ def download_model(force: bool = False) -> Path:
             continue
 
         print(f"  ⬇️  Descargando {filename}...")
-        response = requests.get(url, stream=True, timeout=60)
+        headers = {"User-Agent": f"spharagusnet/{RELEASE_TAG}"}
+        response = requests.get(url, stream=True, timeout=60, headers=headers)
         response.raise_for_status()
 
         total = int(response.headers.get("content-length", 0))

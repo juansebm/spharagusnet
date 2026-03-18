@@ -3,7 +3,7 @@
 
 # ── PDF y renderizado de páginas ────────────────────────────────────────────
 pdfplumber>=0.11.0          # extracción de texto de PDFs digitales (lado limpio)
-pdf2image>=1.17.0           # PDF → imagen PIL por página (ambos lados)
+pymupdf>=1.24.0             # PDF → imagen por página, sin dependencias externas
 Pillow>=10.0.0              # manipulación de imágenes
 pytesseract>=0.3.13         # OCR rough sólo para alineación página↔texto (no es el producto)
 python-Levenshtein>=0.25.0  # similitud texto para alineación scan↔texto limpio

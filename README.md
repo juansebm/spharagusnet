@@ -18,30 +18,6 @@ La diferencia es fundamental. **Tesseract OCR puro** extrae todo texto de una im
 
 Con documentos escaneados complejos, el resultado es **90% ruido, 10% contenido útil**.
 
-```
-┌─────────────────────────────────────────────┐
-│ OCR CONVENCIONAL (Tesseract solo)           │
-├─────────────────────────────────────────────┤
-│ ES ÓN = PATA > Me A A E A AS               │
-│ 1 A sas "e . Cr, - . MN y                  │
-│ Ps CINARIO SU TOC NTNURLICADE CHILE        │
-│ ; A Maries £5 de Septiémbre de 1990 Pág   │
-│ ... (caracteres aleatorios, basura)        │
-└─────────────────────────────────────────────┘
-❌ Inutilizable. 90% ruido, errores OCR severos.
-
-┌─────────────────────────────────────────────┐
-│ CON RED NEURONAL (SpharagusNet)             │
-├─────────────────────────────────────────────┤
-│ Valparaíso, de Septiembre de Andrés Couve  │
-│ Rioseco, Subsecretario de Educación        │
-│ Ministerio de Educación AUTORIZA...        │
-│ Que es necesario establecer procedimientos │
-│ que permitan una eficaz inserción de...    │
-└─────────────────────────────────────────────┘
-✅ Legible. 85% contenido relevante, 15% ruido residual.
-```
-
 ### ¿Cómo? La red **aprende a clasificar**
 
 La red neuronal no "mejora" Tesseract. En cambio:
@@ -59,11 +35,9 @@ La red neuronal no "mejora" Tesseract. En cambio:
 
 | Métrica | OCR Puro | SpharagusNet |
 |---------|----------|--------------|
-| **Contenido útil** | 10% | 85% |
-| **Ruido/Basura** | 90% | 15% |
 | **Usable para NLP** | ❌ No | ✅ Sí |
 | **Extracción de datos** | ❌ Falla | ✅ Funciona |
-| **Análisis sintáctico** | ❌ Imposible | ✅ Posible |
+| **Análisis sintáctico** | ❌ Difícil | ✅ Posible |
 | **Buscabilidad** | ❌ Pobre | ✅ Excelente |
 
 ### Ventajas Prácticas
@@ -80,24 +54,39 @@ La red neuronal no "mejora" Tesseract. En cambio:
 
 ## Instalación
 
+### 1. Dependencia de sistema: Tesseract OCR
+
+`pytesseract` es solo un wrapper Python — el binario `tesseract` debe estar instalado en el sistema operativo:
+
+**Ubuntu / Debian / WSL:**
+```bash
+sudo apt install tesseract-ocr tesseract-ocr-spa
+```
+
+**macOS:**
+```bash
+brew install tesseract tesseract-lang
+```
+
+**Windows (nativo):**
+Descarga el instalador desde [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki) y asegúrate de marcar el idioma **Spanish** durante la instalación.
+
+Verifica que quedó bien instalado:
+```bash
+tesseract --version
+tesseract --list-langs   # debe aparecer "spa"
+```
+
+### 2. Instalar el paquete
+
 ```bash
 pip install spharagusnet
 ```
 
-> **Requisito de sistema:** Tesseract OCR debe estar instalado (`sudo apt install tesseract-ocr tesseract-ocr-spa` en Ubuntu, o `brew install tesseract` en macOS).
-
-Primera vez — descargar el modelo pre-entrenado (~300 MB):
+La primera vez es necesario descargar el modelo pre-entrenado (~300 MB)
 
 ```bash
 spharagusnet download
-```
-
-Para desarrollo local (editable):
-
-```bash
-git clone https://github.com/jsmdev/spharagusnet.git
-cd spharagusnet
-pip install -e ".[train]"
 ```
 
 ## Uso
@@ -134,56 +123,7 @@ spharagusnet download --force
 spharagusnet info
 ```
 
-### Buscar documentos en BCN vía SPARQL
-
-```bash
-# Solo comunas de comunas_interes.txt
-python scripts/bcn_sparql_planes.py
-
-# Todas las comunas del CSV
-python scripts/bcn_sparql_planes.py --todas
-```
-
-> **Nota:** El script solo incluye registros cuya columna `urls_documentos` contenga un link de `instrumentosdeplanificacion.minvu.cl`. Registros sin URL de MINVU (en desarrollo, históricos sin digitalizar, o alojados en sitios municipales) se omiten del CSV de salida.
-
-### Preparar dataset y entrenar modelo
-
-```bash
-# 1. Preparar dataset (descarga PDFs, genera imágenes, cachea OCR y etiqueta bloques)
-python scripts/preparar_dataset_entrenamiento.py [--max-pares N]
-
-# 2. Entrenar modelo (con métricas en consola)
-python scripts/entrenar_modelo_extraccion.py
-
-# 3. Extraer texto de un PDF escaneado (con modelo entrenado)
-python scripts/extraer_texto_con_modelo.py <ruta_pdf> [salida.txt] [--confidence 0.5]
-```
-
-### Mejorar el modelo iterativamente
-
-```bash
-# 1. Incrementar datos gradualmente (50 → 100 → 200 → todos)
-python scripts/preparar_dataset_entrenamiento.py --max-pares 80
-
-# 2. Entrenar sobre lo existente
-python scripts/entrenar_modelo_extraccion.py --resume
-
-# 3. Si el val-F1 mejora, genial. Si estanca:
-#    - Agregar más datos (paso 1 con más pares)
-#    - Regenerar labels: borrar los .labels.json y correr paso 1 de nuevo
-#    - Ajustar patience/epochs
-
-# 4. Probar en un documento nuevo
-python scripts/extraer_texto_con_modelo.py nuevo.pdf salida.txt
-```
-
-#### `preparar_dataset_entrenamiento.py`
-- `--max-pares N` limita la cantidad de filas a procesar (por defecto todas).
-- **Incremental:** solo descarga/procesa pares nuevos; los ya existentes se saltan.
-- **Cache OCR:** guarda bloques Tesseract como `.ocr.json` junto a cada imagen, así el entrenamiento posterior no re-corre OCR.
-- **Etiquetado mejorado:** usa trigramas + similitud Levenshtein para decidir relevancia (en vez de overlap de palabras sueltas que matchea "de", "la", etc.).
-- Convierte PDFs página por página a 200 DPI para evitar consumo de RAM excesivo en WSL.
-- Exige par completo (PDF LeyChile + PDF MINVU + imágenes generadas); archivos huérfanos se eliminan automáticamente.
+### Cómo se entrena este modelo
 
 #### `entrenar_modelo_extraccion.py`
 - `--resume`: carga el último checkpoint y continúa entrenando (no parte de cero). Expande el vocabulario automáticamente si hay palabras nuevas.
@@ -201,95 +141,6 @@ python scripts/extraer_texto_con_modelo.py nuevo.pdf salida.txt
 - Block classifier (2 capas FC con ReLU + dropout) → clasificación binaria {irrelevante, relevante}
 - LSTM (generador de texto, para futuras extensiones)
 - **Class weights** para compensar desbalance (más bloques irrelevantes que relevantes)
-
-#### `extraer_texto_con_modelo.py`
-**Flujo de inferencia:**
-1. PDF escaneado → OCR (Tesseract) extrae bloques de texto
-2. Cada bloque → Tokenización + Embedding + Red neuronal
-3. Red predice: 0 (irrelevante) ó 1 (relevante)
-4. Reconstruye documento solo con bloques relevantes
-
-**Parámetros:**
-- `--confidence THRESHOLD`: Umbral de confianza [0-1]
-  - Default: 0.5 (balance entre precision/recall)
-  - Menor threshold → más bloques (recall ↑, pero más falsos positivos)
-  - Mayor threshold → menos bloques (precision ↑, pero pierdes contenido)
-
-**Fallback:** Si el modelo no está disponible, usa heurísticas (filtros manuales)
-
-### Visualizar pipeline completo
-
-```bash
-python scripts/pipeline_completo.py
-```
-
-Muestra documentación completa del flujo, arquitectura y ejemplos de ejecución.
-
-## Arquitectura de la Red Neuronal
-
-### Diagrama del Flujo de Inferencia
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                    PDF MINVU (escaneado)                 │
-└────────────────────────┬─────────────────────────────────┘
-                         │
-        ┌────────────────▼────────────────┐
-        │ 1. CONVERSIÓN PDF → IMÁGENES    │
-        │    (page-by-page, 200 DPI)      │
-        └────────────────┬─────────────────┘
-                         │
-        ┌────────────────▼────────────────────────────────┐
-        │ Para cada página:                               │
-        │                                                 │
-        │  ┌─ 2. OCR (Tesseract)                         │
-        │  │    Imagen → bloques de texto + coordenadas  │
-        │  │    (filtro: confianza > 30%)                │
-        │  │                                              │
-        │  │    [                                         │
-        │  │      {"texto": "Artículo 1", ...},          │
-        │  │      {"texto": "Página 1", ...},            │
-        │  │      {...}                                  │
-        │  │    ]                                        │
-        │  │                                              │
-        │  └─ 3. CLASIFICACIÓN (MODELO NEURONAL)         │
-        │     Para cada bloque:                          │
-        │     a) Tokenizar → [idx_1, idx_2, ...]        │
-        │     b) Embedding → 512-D vectors               │
-        │     c) Pooling → reducir a (512,)              │
-        │     d) Block Classifier (2 FC layers)          │
-        │     e) Softmax → prob(relevante)               │
-        │                                                │
-        │     ┌─────────────────────────────┐            │
-        │     │ Clasificador Binario:       │            │
-        │     │                             │            │
-        │     │ FC(512 → 256) ─ ReLU ─      │            │
-        │     │ Dropout(0.1) ─ FC(256 → 2) │            │
-        │     │                             │            │
-        │     │ Output: [logit_neg, logit_pos]│          │
-        │     │ Pred: argmax() → {0, 1}     │            │
-        │     └─────────────────────────────┘            │
-        │                                                │
-        │  └─ 4. FILTRADO                                │
-        │     Si pred=1 AND confidence >= threshold:    │
-        │       → MANTENER bloque                        │
-        │     Sino:                                      │
-        │       → DESCARTAR bloque                       │
-        │                                                │
-        └─────────────────┬──────────────────────────────┘
-                          │
-        ┌─────────────────▼──────────────┐
-        │ 5. RECONSTRUCCIÓN              │
-        │    Unir bloques relevantes     │
-        │    + limpieza de espacios      │
-        │    + separar por páginas       │
-        └─────────────────┬──────────────┘
-                          │
-        ┌─────────────────▼──────────────┐
-        │ 📄 TEXTO LIMPIO (formato      │
-        │    LeyChile, sin headers/pies) │
-        └───────────────────────────────┘
-```
 
 ### Métricas Reportadas During Training
 
@@ -313,18 +164,3 @@ La tabla de entrenamiento muestra:
 - `ETA`: Tiempo estimado para terminar
 
 **Early Stopping:** El entrenamiento se detiene automáticamente si `val-F1` no mejora durante 5 epochs consecutivos, previniendo overfitting.
-
-## Publicar en PyPI
-
-```bash
-# 1. Subir modelo a GitHub Releases (tag v0.2.0)
-#    - modelo_entrenado.pth
-#    - vocab.json
-
-# 2. Build
-pip install build twine
-python -m build
-
-# 3. Publicar
-twine upload dist/*
-```

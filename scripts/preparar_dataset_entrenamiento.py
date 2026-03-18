@@ -27,11 +27,11 @@ from PIL import Image
 
 # Importaciones opcionales
 try:
-    from pdf2image import convert_from_path
-    PDF2IMAGE_OK = True
+    import fitz  # PyMuPDF
+    FITZ_OK = True
 except ImportError:
-    PDF2IMAGE_OK = False
-    print("⚠️  pdf2image no disponible. Instala con: pip install pdf2image")
+    FITZ_OK = False
+    print("⚠️  PyMuPDF no disponible. Instala con: pip install pymupdf")
 
 try:
     import pdfplumber
@@ -67,6 +67,7 @@ METADATA_DIR = DATASET_DIR / "metadata"
 
 TIMEOUT = 30
 DELAY_BETWEEN_REQUESTS = 1.0
+MAX_RETRIES = 3
 
 
 # ── Utilidades ───────────────────────────────────────────────────────────────
@@ -81,17 +82,25 @@ def generar_hash_url(url: str) -> str:
 
 
 def descargar_archivo(url: str, output_path: Path) -> bool:
-    try:
-        r = requests.get(url, timeout=TIMEOUT, stream=True)
-        r.raise_for_status()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "wb") as f:
-            for chunk in r.iter_content(8192):
-                f.write(chunk)
-        return True
-    except Exception as e:
-        print(f"  ❌ Error descargando {url}: {e}")
-        return False
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    for intento in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, timeout=TIMEOUT, stream=True)
+            r.raise_for_status()
+            with open(output_path, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+            return True
+        except Exception as e:
+            if intento < MAX_RETRIES:
+                espera = 2 ** intento
+                print(f"  ⚠️  Intento {intento}/{MAX_RETRIES} fallido ({e}). Reintentando en {espera}s...")
+                time.sleep(espera)
+            else:
+                print(f"  ❌ Error descargando {url}: {e}")
+    return False
+
+
 
 
 # ── Limpieza de texto BCN ───────────────────────────────────────────────────
@@ -216,25 +225,21 @@ def extraer_texto_leychile(pdf_path: Path) -> str:
 # ── Conversión PDF MINVU → imágenes ─────────────────────────────────────────
 
 def convertir_pdf_minvu_a_imagenes(pdf_path: Path, output_dir: Path) -> List[Path]:
-    if not PDF2IMAGE_OK:
+    if not FITZ_OK:
+        print("  ❌ PyMuPDF no instalado. Ejecuta: pip install pymupdf")
         return []
 
     imagenes: List[Path] = []
-    page_num = 1
     try:
-        while True:
-            pages = convert_from_path(
-                str(pdf_path), dpi=200,
-                first_page=page_num, last_page=page_num,
-            )
-            if not pages:
-                break
-            img_path = output_dir / f"{pdf_path.stem}_page_{page_num:03d}.png"
-            pages[0].save(img_path, "PNG")
+        doc = fitz.open(str(pdf_path))
+        mat = fitz.Matrix(200 / 72, 200 / 72)  # 200 DPI
+        for page_num in range(len(doc)):
+            pix = doc[page_num].get_pixmap(matrix=mat)
+            img_path = output_dir / f"{pdf_path.stem}_page_{page_num + 1:03d}.png"
+            pix.save(str(img_path))
             imagenes.append(img_path)
-            del pages
             gc.collect()
-            page_num += 1
+        doc.close()
     except Exception as e:
         if not imagenes:
             print(f"  ❌ Error convirtiendo PDF: {e}")

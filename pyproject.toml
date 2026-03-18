@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spharagusnet"
-version = "0.2.0"
+version = "0.2.1"
 description = "Neural document OCR for Chilean territorial planning documents"
 readme = "README.md"
 license = {text = "MIT"}
@@ -29,7 +29,7 @@ classifiers = [
 dependencies = [
     "Pillow>=10.0.0",
     "pytesseract>=0.3.13",
-    "pdf2image>=1.17.0",
+    "pymupdf>=1.24.0",
     "torch>=2.2.0",
     "requests>=2.31.0",
     "tqdm>=4.66.0",
@@ -53,9 +53,9 @@ dev = [
 spharagusnet = "spharagusnet.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/jsmdev/spharagusnet"
-Repository = "https://github.com/jsmdev/spharagusnet"
-Issues = "https://github.com/jsmdev/spharagusnet/issues"
+Homepage = "https://github.com/juansebm/spharagusnet"
+Repository = "https://github.com/juansebm/spharagusnet"
+Issues = "https://github.com/juansebm/spharagusnet/issues"
 
 [tool.setuptools.packages.find]
 include = ["spharagusnet*"]
