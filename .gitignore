@@ -180,6 +180,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-/data
+/data/*
 /models
 /output
+
+!/data/planes_origen_modificaciones.csv
+!/data/planes_origen_modificaciones_bcn.csv
